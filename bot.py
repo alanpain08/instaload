@@ -5,8 +5,10 @@ from aiogram import Bot, Dispatcher, types
 from aiogram.utils import executor
 import instaloader
 import os
-import json
+import re
+import shutil
 import sys
+from urllib.parse import urlparse
 from config import TELEGRAM_BOT_TOKEN
 
 DOWNLOADS_DIR = "downloads"
@@ -26,9 +28,41 @@ L = instaloader.Instaloader(
     quiet=True
 )
 
+INSTAGRAM_MEDIA_PATHS = ("/reel/", "/p/", "/tv/")
+
+
+def extract_shortcode(text: str) -> str | None:
+    """Извлекает shortcode из Instagram URL (в т.ч. с query-параметрами вроде igsh)."""
+    url_match = re.search(r"https?://[^\s]+", text)
+    if not url_match:
+        return None
+
+    parsed = urlparse(url_match.group(0))
+    if "instagram.com" not in parsed.netloc.lower():
+        return None
+
+    for media_path in INSTAGRAM_MEDIA_PATHS:
+        if media_path in parsed.path:
+            part = parsed.path.split(media_path, 1)[1]
+            shortcode = part.split("/", 1)[0].strip()
+            if shortcode:
+                return shortcode
+
+    return None
+
+
+def find_first_video_file(directory: str) -> str | None:
+    for root, _, files in os.walk(directory):
+        for file_name in files:
+            if file_name.endswith(".mp4"):
+                return os.path.join(root, file_name)
+    return None
+
+
 @dp.message_handler(commands=['start'])
 async def send_welcome(message: types.Message):
     await message.answer("📥 Отправьте ссылку на Instagram Reels")
+
 
 @dp.message_handler(content_types=types.ContentType.TEXT)
 async def handle_message(message: types.Message):
@@ -43,57 +77,42 @@ async def handle_message(message: types.Message):
             return
     user_last_request[user_id] = current_time
 
-    text = message.text.strip()
-    if "instagram.com/reel/" not in text:
-        await message.answer("❌ Отправьте ссылку на reels")
-        return
-
-    try:
-        shortcode = text.split("/reel/")[1].split("/")[0].split("?")[0]
-    except IndexError:
-        await message.answer("❌ Неверный формат ссылки")
+    shortcode = extract_shortcode(message.text.strip())
+    if not shortcode:
+        await message.answer("❌ Отправьте корректную ссылку на Instagram reel/post")
         return
 
     await message.answer("⏳ Скачиваю...")
 
-    # === ТОЧНО КАК В ВАШЕМ СКРИПТЕ ===
+    request_dir = os.path.join(DOWNLOADS_DIR, f"request_{user_id}_{int(current_time)}")
+
     try:
-        # Создаём папку если нет
-        os.makedirs(DOWNLOADS_DIR, exist_ok=True)
-        
-        # Скачиваем (синхронно, без asyncio.to_thread!)
+        os.makedirs(request_dir, exist_ok=True)
+
         post = instaloader.Post.from_shortcode(L.context, shortcode)
-        L.download_post(post, target=DOWNLOADS_DIR)
+        L.download_post(post, target=request_dir)
 
-        # Ищем .mp4
-        video_path = None
-        for file in os.listdir(DOWNLOADS_DIR):
-            if file.endswith('.mp4'):
-                video_path = os.path.join(DOWNLOADS_DIR, file)
-                break
-
+        video_path = find_first_video_file(request_dir)
         if not video_path:
             raise Exception("Video file not found after download")
 
         caption = post.caption[:100] if post.caption else "Видео из Instagram"
 
-        # Отправляем
         with open(video_path, "rb") as video_file:
             await message.answer_video(video_file, caption=caption)
-
-        # Удаляем файл
-        os.remove(video_path)
 
     except Exception as e:
         error_msg = str(e)
         if "404" in error_msg:
             await message.answer("❌ Пост не найден (удалён или приватный)")
         elif "401" in error_msg:
-            # Если 401 — значит кэш куков истёк, но в терминале работает — странно
-            await message.answer(f"❌ Ошибка 401. Попробуйте снова через минуту.")
+            await message.answer("❌ Ошибка 401. Попробуйте снова через минуту.")
         else:
             await message.answer(f"❌ Ошибка: {error_msg[:100]}")
         print(f"DEBUG: {error_msg}", file=sys.stderr)
+    finally:
+        shutil.rmtree(request_dir, ignore_errors=True)
+
 
 if __name__ == "__main__":
     os.makedirs(DOWNLOADS_DIR, exist_ok=True)
