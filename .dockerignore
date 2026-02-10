@@ -1,0 +1,16 @@
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+env/
+venv/
+venv*/
+ENV/
+.venv/
+env.bak/
+venv.bak/
+downloads/
+.git
+.gitignore
+session-file
