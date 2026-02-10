@@ -9,11 +9,12 @@ import re
 import shutil
 import sys
 from urllib.parse import urlparse
-from config import TELEGRAM_BOT_TOKEN
+from config import TELEGRAM_BOT_TOKEN, INSTAGRAM_USERNAME, INSTAGRAM_PASSWORD
 
 DOWNLOADS_DIR = "downloads"
 RATE_LIMIT = 10
 user_last_request = {}
+LOGIN_ERROR = None
 
 bot = Bot(token=TELEGRAM_BOT_TOKEN)
 dp = Dispatcher(bot)
@@ -29,6 +30,33 @@ L = instaloader.Instaloader(
 )
 
 INSTAGRAM_MEDIA_PATHS = ("/reel/", "/p/", "/tv/")
+
+
+def login_to_instagram() -> str | None:
+    """Пробует авторизовать Instaloader через сохранённую сессию или логин/пароль."""
+    if not INSTAGRAM_USERNAME:
+        return "INSTAGRAM_USERNAME не задан — бот работает без логина"
+
+    session_file = f"session-{INSTAGRAM_USERNAME}"
+
+    try:
+        L.load_session_from_file(INSTAGRAM_USERNAME, session_file)
+        return "Сессия Instagram загружена из файла"
+    except FileNotFoundError:
+        if not INSTAGRAM_PASSWORD:
+            return "Файл сессии не найден и INSTAGRAM_PASSWORD не задан"
+    except Exception as e:
+        print(f"DEBUG: Не удалось загрузить сессию Instagram: {e}", file=sys.stderr)
+
+    if not INSTAGRAM_PASSWORD:
+        return "INSTAGRAM_PASSWORD не задан — вход в Instagram пропущен"
+
+    try:
+        L.login(INSTAGRAM_USERNAME, INSTAGRAM_PASSWORD)
+        L.save_session_to_file(session_file)
+        return "Вход в Instagram выполнен, сессия сохранена"
+    except Exception as e:
+        return f"Не удалось выполнить вход в Instagram: {e}"
 
 
 def extract_shortcode(text: str) -> str | None:
@@ -89,8 +117,17 @@ async def handle_message(message: types.Message):
     try:
         os.makedirs(request_dir, exist_ok=True)
 
-        post = instaloader.Post.from_shortcode(L.context, shortcode)
-        L.download_post(post, target=request_dir)
+        try:
+            post = instaloader.Post.from_shortcode(L.context, shortcode)
+            L.download_post(post, target=request_dir)
+        except Exception as e:
+            if "401" not in str(e):
+                raise
+
+            relogin_result = login_to_instagram()
+            print(f"DEBUG: 401 retry via login: {relogin_result}", file=sys.stderr)
+            post = instaloader.Post.from_shortcode(L.context, shortcode)
+            L.download_post(post, target=request_dir)
 
         video_path = find_first_video_file(request_dir)
         if not video_path:
@@ -106,7 +143,10 @@ async def handle_message(message: types.Message):
         if "404" in error_msg:
             await message.answer("❌ Пост не найден (удалён или приватный)")
         elif "401" in error_msg:
-            await message.answer("❌ Ошибка 401. Попробуйте снова через минуту.")
+            await message.answer(
+                "❌ Instagram вернул 401. Добавьте INSTAGRAM_USERNAME и INSTAGRAM_PASSWORD в .env "
+                "или загрузите session-файл Instaloader."
+            )
         else:
             await message.answer(f"❌ Ошибка: {error_msg[:100]}")
         print(f"DEBUG: {error_msg}", file=sys.stderr)
@@ -116,6 +156,7 @@ async def handle_message(message: types.Message):
 
 if __name__ == "__main__":
     os.makedirs(DOWNLOADS_DIR, exist_ok=True)
+    LOGIN_ERROR = login_to_instagram()
     print("✅ Бот запущен (работает как ваш download_reel.py)")
-    print("ℹ️  Использует кэш куков из ~/.config/instaloader/")
+    print(f"ℹ️  {LOGIN_ERROR}")
     executor.start_polling(dp, skip_updates=True)
